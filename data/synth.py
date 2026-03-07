@@ -11,36 +11,48 @@ Generates training examples on-the-fly:
 """
 
 import random
-from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-import torch
-from scipy.signal import fftconvolve
+from scipy.signal import fftconvolve, resample_poly
 
 
 def _load_random_audio(file_list, target_len, sr=16000):
-    """Load a random audio file and extract a segment of target_len samples."""
-    path = random.choice(file_list)
-    audio, file_sr = sf.read(path, dtype="float32")
-    if file_sr != sr:
-        # Simple resampling via linear interpolation
-        ratio = sr / file_sr
-        new_len = int(len(audio) * ratio)
-        audio = np.interp(
-            np.linspace(0, len(audio) - 1, new_len),
-            np.arange(len(audio)),
-            audio,
-        )
+    """Load a random audio file and extract a segment of target_len samples.
 
-    # Ensure mono
-    if audio.ndim > 1:
-        audio = audio[:, 0]
+    Uses partial reads via sf.read(start, stop) to avoid loading entire files
+    into memory, which matters for datasets with long recordings.
+    """
+    path = random.choice(file_list)
+    info = sf.info(path)
+    file_sr = info.samplerate
+    total_frames = info.frames
+
+    if file_sr != sr:
+        # Need full read for resampling (can't partial-read then resample cleanly)
+        audio, _ = sf.read(path, dtype="float32")
+        if audio.ndim > 1:
+            audio = audio[:, 0]
+        # Use polyphase anti-aliasing filter for proper downsampling
+        from math import gcd
+        g = gcd(sr, file_sr)
+        audio = resample_poly(audio, sr // g, file_sr // g).astype(np.float32)
+    elif total_frames <= target_len:
+        # File is shorter than target: read entire file, will pad below
+        audio, _ = sf.read(path, dtype="float32")
+        if audio.ndim > 1:
+            audio = audio[:, 0]
+    else:
+        # Partial read: pick a random offset and read only target_len frames
+        start = random.randint(0, total_frames - target_len)
+        audio, _ = sf.read(path, dtype="float32", start=start, stop=start + target_len)
+        if audio.ndim > 1:
+            audio = audio[:, 0]
 
     # Pad or crop to target length
     if len(audio) < target_len:
         audio = np.pad(audio, (0, target_len - len(audio)))
-    else:
+    elif len(audio) > target_len:
         start = random.randint(0, len(audio) - target_len)
         audio = audio[start : start + target_len]
 

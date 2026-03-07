@@ -24,10 +24,5 @@ GGML C++ inference.
 - CCM: 27 channels → 3×3 complex convolving mask (real-valued arithmetic)
 
 ## Code Sources
-- `deepvqe_xr.py`: Xiaobin-Rong NS-only implementation (clean code base)
-- Okrio model.py: AEC reference with far-end branch + AlignBlock
-
-## Known Bugs in Reference Code
-- Xiaobin-Rong AlignBlock (line 57): uses `K.shape[1]` (hidden=32) instead of
-  `x_ref.shape[1]` (in_channels=128) for weighted sum reshape — must fix.
-- Okrio AlignBlock: `torch.zeros()` without `.to(device)` — will fail on GPU.
+See `reference/` directory and README.md "References" section for details.
+Third-party reference implementations and known bugs are documented there.

@@ -1,0 +1,31 @@
+# Training data & artifacts (mounted as volumes at runtime)
+datasets_fullband/
+checkpoints/
+logs/
+eval_output/
+*.pt
+*.bin
+*.gguf
+
+# Git / IDE
+.git/
+.gitignore
+.claude/
+
+# Caches
+.cache/
+
+# Dev files
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+uv.lock
+
+# Docs
+README.md
+paper.pdf
+
+# Nix
+flake.nix
+flake.lock

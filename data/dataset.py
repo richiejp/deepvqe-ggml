@@ -5,6 +5,9 @@ Supports two modes:
 2. Pre-existing: loads pre-synthesized AEC challenge data
 """
 
+import hashlib
+import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -14,16 +17,52 @@ from torch.utils.data import Dataset
 from data.synth import synthesize_example
 from src.stft import stft
 
+_CACHE_DIR = Path(".cache/file_lists")
+
 
 def _collect_audio_files(directory):
-    """Recursively collect .wav and .flac files."""
+    """Recursively collect .wav and .flac files, with disk caching.
+
+    On large datasets (500k+ files), rglob + sort can take minutes.
+    Results are cached to .cache/file_lists/ keyed by directory path.
+    The cache is invalidated when the directory mtime changes.
+    """
+    if not directory:
+        return []
     d = Path(directory)
     if not d.exists():
         return []
+
+    # Cache key based on absolute path
+    abs_path = str(d.resolve())
+    cache_key = hashlib.md5(abs_path.encode()).hexdigest()
+    cache_file = _CACHE_DIR / f"{cache_key}.json"
+    dir_mtime = os.path.getmtime(abs_path)
+
+    # Try loading from cache
+    if cache_file.exists():
+        try:
+            cached = json.loads(cache_file.read_text())
+            if cached.get("mtime") == dir_mtime and cached.get("path") == abs_path:
+                return cached["files"]
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # Scan directory
     files = []
     for ext in ("*.wav", "*.flac"):
-        files.extend(sorted(d.rglob(ext)))
-    return [str(f) for f in files]
+        files.extend(str(f) for f in d.rglob(ext))
+    files.sort()
+
+    # Write cache
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_file.write_text(json.dumps({
+        "path": abs_path,
+        "mtime": dir_mtime,
+        "files": files,
+    }))
+
+    return files
 
 
 class AECDataset(Dataset):
@@ -87,6 +126,7 @@ class AECDataset(Dataset):
             "clean_stft": clean_stft,
             "mic_wav": mic_t.squeeze(0),
             "clean_wav": clean_t.squeeze(0),
+            "delay_samples": metadata["delay_samples"],
             "metadata": metadata,
         }
 
@@ -139,6 +179,7 @@ class DummyAECDataset(Dataset):
             "clean_stft": clean_stft,
             "mic_wav": mic_t.squeeze(0),
             "clean_wav": clean_t.squeeze(0),
+            "delay_samples": self.delay_samples,
             "metadata": {
                 "delay_ms": self.delay_samples / self.sr * 1000,
                 "delay_samples": self.delay_samples,

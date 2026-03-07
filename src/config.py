@@ -11,6 +11,9 @@ class ModelConfig:
     far_channels: List[int] = field(default_factory=lambda: [2, 32, 128])
     align_hidden: int = 32
     dmax: int = 32
+    align_temp_start: float = 1.0
+    align_temp_end: float = 0.1
+    align_temp_epochs: int = 20
     power_law_c: float = 0.3
 
 
@@ -24,8 +27,10 @@ class AudioConfig:
 
 @dataclass
 class TrainingConfig:
+    # NOTE: YAML keys must match fields here — add new fields to BOTH places.
     batch_size: int = 8
     grad_accum_steps: int = 12
+    num_workers: int = 4
     lr: float = 1.2e-3
     weight_decay: float = 5e-7
     epochs: int = 250
@@ -35,14 +40,24 @@ class TrainingConfig:
     warmup_epochs: int = 5
     checkpoint_every: int = 5
     keep_checkpoints: int = 5
+    early_stop_patience: int = 10
+    early_stop_min_delta: float = 1e-3
+    delay_acc_min: float = 0.7
+    erle_min_db: float = 3.0
+    lr_patience: int = 5
+    lr_factor: float = 0.5
+    lr_min: float = 1e-6
 
 
 @dataclass
 class LossConfig:
     plcmse_weight: float = 1.0
     mag_l1_weight: float = 0.5
-    time_l1_weight: float = 0.1
-    power_law_c: float = 0.3
+    time_l1_weight: float = 0.5
+    sisdr_weight: float = 0.5
+    delay_weight: float = 1.0
+    entropy_weight: float = 0.01
+    power_law_c: float = 0.5
 
 
 @dataclass

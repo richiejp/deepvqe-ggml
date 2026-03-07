@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 
@@ -13,11 +15,12 @@ class AlignBlock(nn.Module):
       (in_channels) for the weighted sum reshape.
     """
 
-    def __init__(self, in_channels, hidden_channels, dmax=32):
+    def __init__(self, in_channels, hidden_channels, dmax=32, temperature=1.0):
         super().__init__()
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
         self.dmax = dmax
+        self.temperature = temperature
 
         # Pointwise projections for Q and K
         self.pconv_mic = nn.Conv2d(in_channels, hidden_channels, 1)
@@ -55,14 +58,15 @@ class AlignBlock(nn.Module):
         Ku = Ku.view(B, self.hidden_channels, self.dmax, T, F)
         Ku = Ku.permute(0, 1, 3, 2, 4).contiguous()  # (B, H, T, dmax, F)
 
-        # Cross-attention similarity: sum over frequency
+        # Cross-attention similarity: sum over frequency, scaled by sqrt(F)
         V = torch.sum(Q.unsqueeze(-2) * Ku, dim=-1)  # (B, H, T, dmax)
+        V = V / math.sqrt(F)
 
         # Smooth and reduce to single-head attention
         V = self.conv(V)  # (B, 1, T, dmax)
 
-        # Softmax over delay dimension
-        A = torch.softmax(V, dim=-1)  # (B, 1, T, dmax)
+        # Softmax over delay dimension (temperature < 1 sharpens the distribution)
+        A = torch.softmax(V / self.temperature, dim=-1)  # (B, 1, T, dmax)
 
         # Unfold x_ref (full channels) for the weighted sum
         # BUG FIX: use in_channels (C), not hidden_channels

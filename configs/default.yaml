@@ -3,6 +3,9 @@ model:
   far_channels: [2, 32, 128]
   align_hidden: 32
   dmax: 32
+  align_temp_start: 1.0
+  align_temp_end: 0.1
+  align_temp_epochs: 20
   power_law_c: 0.3
 
 audio:
@@ -12,29 +15,40 @@ audio:
   n_freqs: 257  # n_fft // 2 + 1
 
 training:
-  batch_size: 8
-  grad_accum_steps: 12
+  batch_size: 32
+  grad_accum_steps: 2
+  num_workers: 12
   lr: 1.2e-3
   weight_decay: 5.0e-7
   epochs: 250
   clip_length_sec: 3.0
   amp: true
   grad_clip: 5.0
-  warmup_epochs: 5
+  warmup_epochs: 3
   checkpoint_every: 5
   keep_checkpoints: 5
+  early_stop_patience: 30      # stop after N epochs with no val loss improvement
+  early_stop_min_delta: 1.0e-4  # minimum decrease to count as improvement
+  delay_acc_min: 0.7            # min delay accuracy to accept (fraction, ±1 frame tolerance)
+  erle_min_db: 3.0              # min ERLE (dB) to accept
+  lr_patience: 3               # epochs to wait before reducing LR
+  lr_factor: 0.5               # multiply LR by this on plateau
+  lr_min: 1.0e-6               # minimum learning rate
 
 loss:
   plcmse_weight: 1.0
   mag_l1_weight: 0.5
-  time_l1_weight: 0.1
-  power_law_c: 0.3
+  time_l1_weight: 0.5
+  sisdr_weight: 0.0
+  delay_weight: 1.0
+  entropy_weight: 0.01
+  power_law_c: 0.5
 
 data:
-  clean_dir: ""       # path to DNS clean speech
-  noise_dir: ""       # path to DNS noise
-  rir_dir: ""         # path to RIR datasets
-  farend_dir: ""      # path to far-end speech (can be same as clean_dir)
+  clean_dir: "/data/clean_fullband"
+  noise_dir: "datasets_fullband/datasets_fullband/noise_fullband"
+  rir_dir: "datasets_fullband/datasets_fullband/impulse_responses"
+  farend_dir: ""      # empty = reuse clean_dir
   snr_range: [5, 40]
   ser_range: [-10, 10]
   delay_range: [0, 320]  # ms

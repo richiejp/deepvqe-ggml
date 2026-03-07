@@ -2,9 +2,21 @@ __pycache__/
 *.pyc
 .venv/
 *.egg-info/
+uv.lock
+
+# Training artifacts (mounted as Docker volumes)
 checkpoints/
 logs/
+eval_output/
 *.pt
 *.bin
+*.gguf
+
+# Training data
+datasets_fullband/
+
+# Caches
+.cache/
+
+# IDE / tool
 .claude/
-uv.lock

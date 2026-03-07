@@ -79,6 +79,8 @@ def evaluate(cfg, checkpoint_path, dummy=False, output_dir="eval_output", max_sa
     # Model
     model = DeepVQEAEC.from_config(cfg).to(device)
     epoch = load_checkpoint(checkpoint_path, model)
+    if device.type == "cuda":
+        model = torch.compile(model)
     model.eval()
     print(f"Loaded checkpoint from epoch {epoch}")
 
@@ -105,19 +107,20 @@ def evaluate(cfg, checkpoint_path, dummy=False, output_dir="eval_output", max_sa
     target_len = int(cfg.training.clip_length_sec * sr)
 
     all_metrics = []
+    use_amp = device.type == "cuda"
 
     with torch.no_grad():
         for i in range(n_samples):
             sample = val_ds[i]
             mic_stft = sample["mic_stft"].unsqueeze(0).to(device)
             ref_stft = sample["ref_stft"].unsqueeze(0).to(device)
-            clean_stft = sample["clean_stft"].unsqueeze(0).to(device)
 
-            enhanced, delay_dist = model(mic_stft, ref_stft, return_delay=True)
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
+                enhanced, delay_dist = model(mic_stft, ref_stft, return_delay=True)
 
-            # Convert to waveforms
-            mic_wav = istft(mic_stft, cfg.audio.n_fft, cfg.audio.hop_length, length=target_len)
-            enh_wav = istft(enhanced, cfg.audio.n_fft, cfg.audio.hop_length, length=target_len)
+            # Convert to waveforms (float32 for metrics)
+            mic_wav = sample["mic_wav"].unsqueeze(0).to(device)
+            enh_wav = istft(enhanced.float(), cfg.audio.n_fft, cfg.audio.hop_length, length=target_len)
             clean_wav = sample["clean_wav"].unsqueeze(0).to(device)
 
             mic_np = mic_wav[0].cpu().numpy()
