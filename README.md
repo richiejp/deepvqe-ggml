@@ -131,6 +131,8 @@ deepvqe/
 - [ ] ERLE > 10 dB at epoch 50+ (needs trained model)
 - [ ] ERLE > 20 dB single-talk at epoch 200+
 - [ ] PESQ > 3.0 double-talk at epoch 200+
+- [ ] Add differentiable STOI proxy loss (e.g. torch-stoi or correlation-based approx)
+- [ ] Add PESQ proxy loss (e.g. PESQ-Net or perceptual weighting)
 
 ### Phase 5: GGML Conversion
 - [x] `export_ggml.py` — BN folding + GGUF export via gguf package

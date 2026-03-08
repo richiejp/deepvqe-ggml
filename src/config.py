@@ -57,6 +57,7 @@ class LossConfig:
     sisdr_weight: float = 0.5
     delay_weight: float = 1.0
     entropy_weight: float = 0.01
+    mask_reg_weight: float = 0.1
     power_law_c: float = 0.5
 
 

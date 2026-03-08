@@ -90,7 +90,7 @@ def main():
             ref_stft = stft(torch.from_numpy(far).unsqueeze(0), cfg.audio.n_fft, hop).to(device)
 
             with torch.no_grad():
-                enhanced, delay_dist = model(mic_stft, ref_stft, return_delay=True)
+                enhanced, delay_dist, mask_raw = model(mic_stft, ref_stft, return_delay=True)
 
             enh_wav = istft(enhanced, cfg.audio.n_fft, hop, length=target_len)[0].cpu().numpy()
 

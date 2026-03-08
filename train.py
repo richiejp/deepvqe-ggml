@@ -22,7 +22,7 @@ from tqdm import tqdm
 
 from data.dataset import AECDataset, DummyAECDataset
 from src.config import load_config
-from src.losses import DeepVQELoss
+from src.losses import DeepVQELoss, mask_magnitude_regularizer
 from src.model import DeepVQEAEC
 from src.stft import istft
 from src.viz import (
@@ -204,7 +204,7 @@ def log_audio_and_spectrograms(writer, model, val_batch, epoch, cfg, device):
         ref_stft = val_batch["ref_stft"][:1].to(device)
         clean_stft = val_batch["clean_stft"][:1].to(device)
 
-        enhanced, delay_dist = model(mic_stft, ref_stft, return_delay=True)
+        enhanced, delay_dist, mask_raw = model(mic_stft, ref_stft, return_delay=True)
         length = val_batch["clean_wav"].shape[-1]
 
         mic_wav = istft(mic_stft, cfg.audio.n_fft, cfg.audio.hop_length, length=length)
@@ -390,7 +390,7 @@ def train(cfg, resume=None, dummy=False):
 
         epoch_losses = {
             "total": 0, "plcmse": 0, "mag_l1": 0, "time_l1": 0,
-            "sisdr": 0, "delay": 0, "entropy": 0,
+            "sisdr": 0, "delay": 0, "entropy": 0, "mask_reg": 0,
         }
         epoch_delay_acc = 0
         n_batches = 0
@@ -405,7 +405,7 @@ def train(cfg, resume=None, dummy=False):
             delay_samp = batch["delay_samples"].to(device, non_blocking=True)
 
             with autocast_ctx():
-                enhanced, delay_dist = model(mic_stft, ref_stft, return_delay=True)
+                enhanced, delay_dist, mask_raw = model(mic_stft, ref_stft, return_delay=True)
                 loss, components = criterion(enhanced, clean_stft, clean_wav)
 
                 # Delay supervision loss
@@ -422,6 +422,11 @@ def train(cfg, resume=None, dummy=False):
                     loss = loss + cfg.loss.entropy_weight * entropy
                 else:
                     components["entropy"] = torch.tensor(0.0, device=device)
+
+                # Mask magnitude regularizer
+                mask_reg = mask_magnitude_regularizer(mask_raw)
+                components["mask_reg"] = mask_reg
+                loss = loss + cfg.loss.mask_reg_weight * mask_reg
 
                 # Update total so loss_ratio/* metrics use the true total
                 components["total"] = loss
@@ -449,6 +454,7 @@ def train(cfg, resume=None, dummy=False):
                 add_scalar_with_help(writer, "train/delay_loss", components["delay"].item(), global_step)
                 add_scalar_with_help(writer, "train/delay_acc", delay_acc.item(), global_step)
                 add_scalar_with_help(writer, "train/entropy", components["entropy"].item(), global_step)
+                add_scalar_with_help(writer, "train/mask_reg", components["mask_reg"].item(), global_step)
                 add_scalar_with_help(writer, "train/lr", cur_lr, global_step)
                 add_scalar_with_help(writer, "train/grad_norm", gn, global_step)
                 log_per_layer_grad_norms(writer, _unwrap(model), global_step)
@@ -459,6 +465,7 @@ def train(cfg, resume=None, dummy=False):
                     "sisdr": cfg.loss.sisdr_weight,
                     "delay": cfg.loss.delay_weight,
                     "entropy": cfg.loss.entropy_weight,
+                    "mask_reg": cfg.loss.mask_reg_weight,
                 }
                 log_loss_ratios(writer, components, global_step, weights=loss_weights)
 
@@ -488,7 +495,7 @@ def train(cfg, resume=None, dummy=False):
         model.eval()
         val_losses = {
             "total": 0, "plcmse": 0, "mag_l1": 0, "time_l1": 0,
-            "sisdr": 0, "delay": 0, "entropy": 0,
+            "sisdr": 0, "delay": 0, "entropy": 0, "mask_reg": 0,
         }
         val_delay_acc = 0
         val_erle = 0
@@ -503,7 +510,7 @@ def train(cfg, resume=None, dummy=False):
                 clean_wav = batch["clean_wav"].to(device, non_blocking=True)
                 delay_samp = batch["delay_samples"].to(device, non_blocking=True)
 
-                enhanced, delay_dist = model(mic_stft, ref_stft, return_delay=True)
+                enhanced, delay_dist, mask_raw = model(mic_stft, ref_stft, return_delay=True)
                 _, components = criterion(enhanced, clean_stft, clean_wav)
 
                 # Delay loss + accuracy
@@ -515,11 +522,15 @@ def train(cfg, resume=None, dummy=False):
                 entropy = compute_attention_entropy(delay_dist)
                 components["entropy"] = entropy
 
+                mask_reg = mask_magnitude_regularizer(mask_raw)
+                components["mask_reg"] = mask_reg
+
                 # Update total so loss_ratio/* metrics use the true total
                 components["total"] = (
                     components["total"]
                     + cfg.loss.delay_weight * delay_loss
                     + cfg.loss.entropy_weight * entropy
+                    + cfg.loss.mask_reg_weight * mask_reg
                 )
 
                 # ERLE

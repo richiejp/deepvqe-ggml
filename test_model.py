@@ -82,7 +82,7 @@ def test_delay_distribution():
     model = DeepVQEAEC().eval()
     mic = torch.randn(1, 257, 32, 2)
     ref = torch.randn(1, 257, 32, 2)
-    _, delay = model(mic, ref, return_delay=True)
+    _, delay, mask_raw = model(mic, ref, return_delay=True)
 
     assert delay.shape == (1, 32, 32), f"Expected (1,32,32), got {delay.shape}"
     sums = delay.sum(-1)

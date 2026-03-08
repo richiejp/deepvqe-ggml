@@ -146,7 +146,7 @@ class DeepVQEAEC(nn.Module):
         enhanced = self.ccm(d1, mic_stft)  # (B, 257, T, 2)
 
         if return_delay:
-            return enhanced, delay_dist
+            return enhanced, delay_dist, d1
         return enhanced
 
     @classmethod

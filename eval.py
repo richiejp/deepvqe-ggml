@@ -116,7 +116,7 @@ def evaluate(cfg, checkpoint_path, dummy=False, output_dir="eval_output", max_sa
             ref_stft = sample["ref_stft"].unsqueeze(0).to(device)
 
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
-                enhanced, delay_dist = model(mic_stft, ref_stft, return_delay=True)
+                enhanced, delay_dist, mask_raw = model(mic_stft, ref_stft, return_delay=True)
 
             # Convert to waveforms (float32 for metrics)
             mic_wav = sample["mic_wav"].unsqueeze(0).to(device)

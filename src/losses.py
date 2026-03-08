@@ -5,12 +5,38 @@ Multi-component loss:
 2. Magnitude L1 (weight=0.5)
 3. Time-domain L1 (weight=0.5)
 4. SI-SDR (weight=0.0, disabled — spectral losses drive AEC training)
+5. Mask magnitude regularizer (penalizes deviation from unity)
 """
 
+import numpy as np
 import torch
 import torch.nn as nn
+from einops import rearrange
 
 from src.stft import istft
+
+
+def mask_mag_from_raw(d1):
+    """Compute per-element mask magnitude from raw 27-channel decoder output.
+
+    The 27 channels encode 3 cube-root-of-unity basis × 9 kernel elements.
+    This decomposes into H_real and H_imag (each 9 elements), then computes
+    the magnitude per kernel tap: sqrt(H_real^2 + H_imag^2).
+
+    Args:
+        d1: (B, 27, T, F) raw mask channels from decoder
+
+    Returns:
+        mask_mag: (B, 9, T, F) magnitude per kernel element
+    """
+    v_real = torch.tensor([1, -0.5, -0.5], device=d1.device, dtype=d1.dtype)
+    v_imag = torch.tensor(
+        [0, np.sqrt(3) / 2, -np.sqrt(3) / 2], device=d1.device, dtype=d1.dtype
+    )
+    m = rearrange(d1, "b (r c) t f -> b r c t f", r=3)
+    H_real = torch.sum(v_real[None, :, None, None, None] * m, dim=1)  # (B,9,T,F)
+    H_imag = torch.sum(v_imag[None, :, None, None, None] * m, dim=1)  # (B,9,T,F)
+    return torch.sqrt(H_real ** 2 + H_imag ** 2 + 1e-12)
 
 
 def si_sdr(pred, target):
@@ -29,6 +55,26 @@ def si_sdr(pred, target):
         torch.sum(s_target**2, dim=-1) / (torch.sum(e_noise**2, dim=-1) + 1e-8) + 1e-8
     )
     return -si_sdr_val.mean()  # negative so we minimize
+
+
+def mask_magnitude_regularizer(d1):
+    """Penalize CCM mask magnitude deviating from 1 (identity/passthrough).
+
+    For each of the 9 kernel taps, the ideal identity mask has magnitude 1
+    at the center tap and 0 elsewhere.  We use a simpler formulation: pull
+    the *mean* magnitude (across all 9 taps) toward 1.  This prevents both
+    over-suppression (mag→0) and explosion (mag→∞) without micro-managing
+    individual taps.
+
+    Args:
+        d1: (B, 27, T, F) raw 27-channel decoder output (before CCM)
+
+    Returns:
+        Scalar regularization loss.
+    """
+    mag = mask_mag_from_raw(d1)  # (B, 9, T, F)
+    mean_mag = mag.mean(dim=1)  # (B, T, F) — average over 9 kernel taps
+    return torch.mean((mean_mag - 1.0) ** 2)
 
 
 class DeepVQELoss(nn.Module):

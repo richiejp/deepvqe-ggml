@@ -411,6 +411,16 @@ METRIC_HELP = {
         "attention has multiple modes — the model hedges its bets. "
         "Lower the temperature faster or increase entropy_weight."
     ),
+    "train/mask_reg": (
+        "**Mask magnitude regularizer** — MSE between mean CCM mask magnitude "
+        "and 1.0 (identity/passthrough).  \n"
+        "Prevents the mask from collapsing to zero (over-suppression) or "
+        "exploding (amplification).  \n\n"
+        "**Healthy range:** 0.1-0.5 early, <0.1 when converged.  \n"
+        "**Watch for:** If this stays high (>1.0), the model is struggling to "
+        "produce unit-magnitude masks. If it drops to 0 immediately, the "
+        "weight may be too high (model just outputs identity, ignoring other losses)."
+    ),
     "train/lr": (
         "**Learning rate** from the optimizer.  \n"
         "Uses linear warmup for the first N epochs, then ReduceLROnPlateau "

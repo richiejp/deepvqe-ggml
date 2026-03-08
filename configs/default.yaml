@@ -42,6 +42,7 @@ loss:
   sisdr_weight: 0.0
   delay_weight: 1.0
   entropy_weight: 0.01
+  mask_reg_weight: 0.1
   power_law_c: 0.5
 
 data:
