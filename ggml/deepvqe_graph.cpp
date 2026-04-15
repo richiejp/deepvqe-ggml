@@ -34,6 +34,45 @@ static struct ggml_tensor* input_3d(struct ggml_context* ctx,
     return t;
 }
 
+// ── Conv2d for quantized weights ─────────────────────────────────────────
+
+// ggml_conv_2d requires 4D kernel with ne[0] % block_size == 0, which fails
+// for quantized types (KW=3 < 32). This helper does im2col + mul_mat manually.
+// For F32 weights, it falls through to ggml_conv_2d.
+static struct ggml_tensor* conv_2d_q(
+    struct ggml_context* ctx,
+    struct ggml_tensor* weight,  // 4D F32 (kW, kH, IC, OC) or 2D quantized (kW*kH*IC, OC)
+    struct ggml_tensor* input,   // 4D (W, H, C, N)
+    int s0, int s1, int p0, int p1, int d0, int d1,
+    int kW, int kH               // kernel dims (used when weight is 2D quantized)
+) {
+    if (weight->type == GGML_TYPE_F32) {
+        return ggml_conv_2d(ctx, weight, input, s0, s1, p0, p1, d0, d1);
+    }
+
+    int64_t row_size = weight->ne[0];
+    int64_t OC = weight->ne[1];
+    int64_t IC = row_size / (kW * kH);
+
+    struct ggml_tensor* shape = ggml_new_tensor_4d(ctx, input->type, kW, kH, IC, OC);
+
+    struct ggml_tensor* im2col = ggml_im2col(ctx, shape, input,
+                                              s0, s1, p0, p1, d0, d1,
+                                              true, input->type);
+
+    struct ggml_tensor* im2col_2d = ggml_reshape_2d(ctx, im2col,
+        im2col->ne[0],
+        im2col->ne[3] * im2col->ne[2] * im2col->ne[1]);
+
+    struct ggml_tensor* result = ggml_mul_mat(ctx, weight, im2col_2d);
+
+    result = ggml_reshape_4d(ctx, result,
+        im2col->ne[1], im2col->ne[2], im2col->ne[3], OC);
+    result = ggml_cont(ctx, ggml_permute(ctx, result, 0, 1, 3, 2));
+
+    return result;
+}
+
 // ── Block graphs ──────────────────────────────────────────────────────────
 
 // Feature extraction: STFT (ne0=2, ne1=T, ne2=F) → (ne0=F, ne1=T, ne2=2)
@@ -91,10 +130,8 @@ static struct ggml_tensor* build_causal_conv(
                                                0, 0);   // dim3 (batch): none
 
     // Conv2d: stride (sF, 1) on (dim0=freq, dim1=time), no additional padding
-    struct ggml_tensor* conv = ggml_conv_2d(ctx, weight, padded,
-                                             sF, 1,   // stride: freq, time
-                                             0, 0,    // padding: none (already padded)
-                                             1, 1);   // dilation
+    struct ggml_tensor* conv = conv_2d_q(ctx, weight, padded,
+                                          sF, 1, 0, 0, 1, 1, 3, 4);
 
     // Add bias: bias is (C_out), conv is (F_out, T, C_out, 1)
     // Reshape bias for broadcasting: (1, 1, C_out, 1)
@@ -137,7 +174,7 @@ static struct ggml_tensor* build_decoder_block(
 
     // skip_conv(x_en): 1x1 conv
     struct ggml_tensor* x_en_4d = ggml_reshape_4d(ctx, x_en, F, T, C, 1);
-    struct ggml_tensor* skip = ggml_conv_2d(ctx, skip_w, x_en_4d, 1, 1, 0, 0, 1, 1);
+    struct ggml_tensor* skip = conv_2d_q(ctx, skip_w, x_en_4d, 1, 1, 0, 0, 1, 1, 1, 1);
     // Bias
     struct ggml_tensor* sb = ggml_reshape_4d(ctx, skip_b, 1, 1, skip_b->ne[0], 1);
     skip = ggml_add(ctx, skip, sb);
@@ -152,7 +189,7 @@ static struct ggml_tensor* build_decoder_block(
     res = ggml_add(ctx, ggml_elu(ctx, res), y);
 
     // SubpixelConv2d: causal_conv → pixel shuffle
-    int64_t C_out = deconv_w->ne[3] / 2;
+    int64_t C_out = ((ggml_n_dims(deconv_w) == 4) ? deconv_w->ne[3] : deconv_w->ne[1]) / 2;
     struct ggml_tensor* deconv = build_causal_conv(ctx, res, deconv_w, deconv_b, 1);
     // deconv: (F, T, C_out*2, 1) → strip batch dim
     deconv = ggml_reshape_3d(ctx, deconv, F, T, C_out * 2);
@@ -725,14 +762,16 @@ static struct ggml_tensor* build_causal_conv_s(
     ggml_set_output(new_hist);
     sg.conv_hist_out.push_back(new_hist);
 
-    // Reshape to 4D, pad freq only, conv
+    // Reshape to 4D, pad freq, conv
+    // TODO: p0=1 should eliminate pad_ext but produces wrong results in full model
+    // despite passing isolated tests. See ARCHITECTURE.md or git log for details.
     struct ggml_tensor* x4d = ggml_reshape_4d(ctx, cat, F, 4, C_in, 1);
     struct ggml_tensor* padded = ggml_pad_ext(ctx, x4d,
                                                1, 1,   // freq: left=1, right=1
-                                               0, 0,   // time: none (history provides padding)
+                                               0, 0,   // time: none
                                                0, 0, 0, 0);
-    struct ggml_tensor* conv = ggml_conv_2d(ctx, weight, padded,
-                                             sF, 1, 0, 0, 1, 1);
+    struct ggml_tensor* conv = conv_2d_q(ctx, weight, padded,
+                                          sF, 1, 0, 0, 1, 1, 3, 4);
     struct ggml_tensor* b = ggml_reshape_4d(ctx, bias, 1, 1, bias->ne[0], 1);
     conv = ggml_add(ctx, conv, b);
 
@@ -961,7 +1000,7 @@ static struct ggml_tensor* build_decoder_block_s(
 
     // Skip conv (1x1, no history)
     struct ggml_tensor* x_en_4d = ggml_reshape_4d(ctx, x_en, F, 1, C, 1);
-    struct ggml_tensor* skip = ggml_conv_2d(ctx, skip_w, x_en_4d, 1, 1, 0, 0, 1, 1);
+    struct ggml_tensor* skip = conv_2d_q(ctx, skip_w, x_en_4d, 1, 1, 0, 0, 1, 1, 1, 1);
     struct ggml_tensor* sb = ggml_reshape_4d(ctx, skip_b, 1, 1, skip_b->ne[0], 1);
     skip = ggml_add(ctx, skip, sb);
     skip = ggml_reshape_3d(ctx, skip, F, 1, C);
@@ -974,7 +1013,7 @@ static struct ggml_tensor* build_decoder_block_s(
     res = ggml_add(ctx, ggml_elu(ctx, res), y);
 
     // SubpixelConv2d (causal conv with history) → pixel shuffle
-    int64_t C_out = deconv_w->ne[3] / 2;
+    int64_t C_out = ((ggml_n_dims(deconv_w) == 4) ? deconv_w->ne[3] : deconv_w->ne[1]) / 2;
     struct ggml_tensor* deconv = build_causal_conv_s(ctx, sg, res, deconv_w, deconv_b, 1);
     deconv = ggml_reshape_3d(ctx, deconv, F, 1, C_out * 2);
 
@@ -1239,24 +1278,21 @@ void process_frame_graph(dvqe_stream_graph& sg, dvqe_graph_model& m,
     // Layout: mic_stft_frame is [f0_re, f0_im, f1_re, f1_im, ...] = F*2 floats
     // Tensor mic_in is (ne0=2, ne1=1, ne2=F), which in memory is: 2 fastest
     // So memory layout is: [f0_re, f0_im, f1_re, f1_im, ...] — matches!
-    ggml_backend_tensor_set(sg.mic_in, mic_stft_frame, 0, F * 2 * sizeof(float));
-    ggml_backend_tensor_set(sg.ref_in, ref_stft_frame, 0, F * 2 * sizeof(float));
+    // Direct memcpy for CPU backend (avoids backend dispatch overhead)
+    memcpy(sg.mic_in->data, mic_stft_frame, F * 2 * sizeof(float));
+    memcpy(sg.ref_in->data, ref_stft_frame, F * 2 * sizeof(float));
 
     // Compute
     ggml_backend_graph_compute(m.backend, sg.graph);
 
-    // Read enhanced output
-    ggml_backend_tensor_get(sg.enhanced_out, enhanced_stft_frame, 0, F * 2 * sizeof(float));
+    // Read enhanced output (direct pointer for CPU)
+    memcpy(enhanced_stft_frame, sg.enhanced_out->data, F * 2 * sizeof(float));
 
-    // Update histories: copy each output back to corresponding input
-    // Uses persistent scratch buffer — no per-frame heap allocation.
-    uint8_t* scratch = sg.hist_scratch.data();
-
-    auto copy_hist = [scratch](struct ggml_tensor* in, struct ggml_tensor* out) {
+    // Update histories: copy each output back to corresponding input.
+    // For CPU backend, direct memcpy (avoids double-copy through scratch).
+    auto copy_hist = [](struct ggml_tensor* in, struct ggml_tensor* out) {
         if (!in || !out) return;
-        size_t sz = ggml_nbytes(in);
-        ggml_backend_tensor_get(out, scratch, 0, sz);
-        ggml_backend_tensor_set(in, scratch, 0, sz);
+        memcpy(in->data, out->data, ggml_nbytes(in));
     };
 
     for (size_t i = 0; i < sg.conv_hist_in.size(); i++)
@@ -1269,12 +1305,10 @@ void process_frame_graph(dvqe_stream_graph& sg, dvqe_graph_model& m,
 }
 
 void reset_stream_graph(dvqe_stream_graph& sg, dvqe_graph_model& m) {
-    // Zero the scratch buffer once, then use it to zero all history tensors.
-    std::memset(sg.hist_scratch.data(), 0, sg.hist_scratch.size());
-
-    auto zero_tensor = [&sg](struct ggml_tensor* t) {
+    // Direct memset for CPU backend
+    auto zero_tensor = [](struct ggml_tensor* t) {
         if (!t) return;
-        ggml_backend_tensor_set(t, sg.hist_scratch.data(), 0, ggml_nbytes(t));
+        memset(t->data, 0, ggml_nbytes(t));
     };
 
     for (auto* h : sg.conv_hist_in)

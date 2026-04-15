@@ -126,6 +126,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_conv2d_minimal.cpp")
     target_link_libraries(test_conv2d_minimal PRIVATE ggml)
 endif()
 
+# Quantize tool (F32 GGUF -> Q8_0 with correct 2D shapes)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/quantize.cpp")
+    add_executable(quantize quantize.cpp)
+    target_link_libraries(quantize PRIVATE ggml)
+endif()
+
 # STFT test (includes end-to-end model comparison via C API)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_stft.cpp")
     add_executable(test_stft test_stft.cpp deepvqe_api.cpp)
