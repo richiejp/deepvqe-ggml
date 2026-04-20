@@ -4,6 +4,13 @@ C/C++ inference engine for [DeepVQE](https://arxiv.org/abs/2306.03177)
 (Indenbom et al., Interspeech 2023) — real-time acoustic echo cancellation
 with soft delay estimation, built on [GGML](https://github.com/ggerganov/ggml).
 
+> **Looking for something smaller?** We've since released
+> [LocalVQE](https://github.com/localai-org/LocalVQE), a ~0.9M-parameter
+> (~3.5 MB F32) derivative of DeepVQE with an in-graph DCT-II filterbank
+> and an S4D bottleneck — roughly 9× smaller than the model in this repo,
+> with streaming C++ inference and a Vulkan backend. This repository
+> remains the full-width ~8M-parameter DeepVQE re-implementation.
+
 ## Building
 
 Requires cmake and a C/C++17 compiler. A [Nix](https://nixos.org/) flake is
