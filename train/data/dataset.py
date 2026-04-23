@@ -143,8 +143,16 @@ class AECDataset(Dataset):
         self.ser_range = tuple(cfg.data.ser_range)
         self.delay_range = tuple(cfg.data.delay_range)
         self.single_talk_prob = cfg.data.single_talk_prob
+        self.single_talk_nearend_prob = cfg.data.single_talk_nearend_prob
+        self.ref_active_no_echo_prob = cfg.data.ref_active_no_echo_prob
+        self.silent_nearend_prob = cfg.data.silent_nearend_prob
+        self.nonspeech_ref_prob = cfg.data.nonspeech_ref_prob
+        self.rir_skip_prob = cfg.data.rir_skip_prob
         self.max_rir_length_ms = cfg.data.max_rir_length_ms
         self.drr_range = tuple(cfg.data.drr_range)
+        self.farend_aug = cfg.data.farend_aug
+        self.nearend_aug = cfg.data.nearend_aug
+        self.mic_aug = cfg.data.mic_aug
 
         all_clean = collect_audio_files(cfg.data.clean_dir)
         if cfg.data.dnsmos_ovrl_min > 0:
@@ -184,8 +192,16 @@ class AECDataset(Dataset):
             ser_range=self.ser_range,
             delay_range=self.delay_range,
             single_talk_prob=self.single_talk_prob,
+            single_talk_nearend_prob=self.single_talk_nearend_prob,
+            ref_active_no_echo_prob=self.ref_active_no_echo_prob,
+            silent_nearend_prob=self.silent_nearend_prob,
+            nonspeech_ref_prob=self.nonspeech_ref_prob,
             max_rir_length_ms=self.max_rir_length_ms,
             drr_range=self.drr_range,
+            rir_skip_prob=self.rir_skip_prob,
+            farend_aug=self.farend_aug,
+            nearend_aug=self.nearend_aug,
+            mic_aug=self.mic_aug,
         )
 
         # Convert to tensors and compute STFTs

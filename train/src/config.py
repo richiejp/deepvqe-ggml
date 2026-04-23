@@ -64,6 +64,143 @@ class LossConfig:
 
 
 @dataclass
+class FarEndAugConfig:
+    """Realism augmentations on the far-end / echo path.
+
+    Defaults mirror LocalVQE's main-pretraining values so the pipeline
+    produces the anti-shortcut distribution out-of-the-box. Set any prob
+    to 0 to disable that stage. Every stage is independently prob-gated —
+    the identity baseline is always in the training distribution so the
+    model can't fingerprint an always-on pipeline.
+    """
+    # Amplifier saturation on farend pre-RIR.
+    saturation_prob: float = 0.20
+    drive_range: Tuple[float, float] = (1.0, 2.5)
+    nonlin_family: str = "random"  # "tanh" | "arctan" | "softsign" | "random"
+    hardclip_prob: float = 0.03
+    hardclip_thresh_range: Tuple[float, float] = (0.88, 0.98)
+
+    # Speaker body EQ applied to echo post-RIR.
+    speaker_eq_prob: float = 0.4
+    eq_hpf_range: Tuple[float, float] = (80.0, 200.0)
+    eq_lpf_range: Tuple[float, float] = (5000.0, 8000.0)
+    eq_q_range: Tuple[float, float] = (0.5, 1.2)
+    eq_bump_prob: float = 0.5
+    eq_bump_freq_range: Tuple[float, float] = (200.0, 2500.0)
+    eq_bump_gain_db_range: Tuple[float, float] = (-3.0, 5.0)
+
+    # Feedforward compressor applied to farend before the ref/echo branch.
+    ref_agc_prob: float = 0.20
+    agc_threshold_db_range: Tuple[float, float] = (-24.0, -9.0)
+    agc_ratio_range: Tuple[float, float] = (2.0, 4.0)
+    agc_attack_ms: float = 5.0
+    agc_release_ms: float = 50.0
+
+    # Reference level mismatch applied to farend_out post-peak-norm.
+    ref_gain_prob: float = 0.3
+    ref_gain_db_range: Tuple[float, float] = (-20.0, 3.0)
+
+    # Time-varying RIR on echo path.
+    rir_crossfade_prob: float = 0.10
+
+    # Clock drift between reference and mic stream.
+    ref_drift_prob: float = 0.15
+    ref_drift_ppm_range: Tuple[float, float] = (-100.0, 100.0)
+
+    # Ref-burst gate: zeroes contiguous chunks of ref AND echo (they're
+    # physically coupled — speaker off → no echo). Off by default to
+    # match LocalVQE main pretraining (finetune-only).
+    ref_burst_prob: float = 0.0
+    ref_burst_zero_frac_range: Tuple[float, float] = (0.3, 0.7)
+    ref_burst_block_ms_range: Tuple[float, float] = (200.0, 1500.0)
+
+    # Pre-cancelled echo: upstream AEC has already attenuated echo by
+    # 15-40 dB before it reaches our model. Off by default.
+    pre_cancelled_prob: float = 0.0
+    pre_cancelled_db_range: Tuple[float, float] = (-40.0, -15.0)
+
+    # Ref fade envelope: cosine fade-in/out/dip applied jointly to ref
+    # and echo. Off by default.
+    ref_fade_prob: float = 0.0
+    ref_fade_duration_ms_range: Tuple[float, float] = (300.0, 1500.0)
+
+    # Ref dither floor: replace NE-ST zeros with low-dBFS white noise.
+    # Off by default.
+    ref_dither_prob: float = 0.0
+    ref_dither_db_range: Tuple[float, float] = (-75.0, -55.0)
+
+    # Ambient pickup: blend a low-level copy of mic-side noise into ref.
+    # Off by default.
+    ref_ambient_prob: float = 0.0
+    ref_ambient_db_range: Tuple[float, float] = (-40.0, -20.0)
+
+    def is_active(self) -> bool:
+        return any(p > 0 for p in (
+            self.saturation_prob, self.hardclip_prob, self.speaker_eq_prob,
+            self.ref_agc_prob, self.rir_crossfade_prob,
+            self.ref_gain_prob, self.ref_drift_prob,
+            self.ref_burst_prob, self.pre_cancelled_prob, self.ref_fade_prob,
+            self.ref_dither_prob, self.ref_ambient_prob,
+        ))
+
+
+@dataclass
+class NearEndAugConfig:
+    """Realism augmentations on the near-end speaker's voice.
+
+    Applied to the near-end signal BEFORE the room RIR so the effects
+    propagate through reverberation realistically. The same transforms
+    are applied to the clean target — the model's job stays "suppress
+    echo/noise + preserve this voice", not "invert the speaker's AGC".
+    """
+    # Speaker's own preamp AGC (their laptop/phone mic's gain ride).
+    agc_prob: float = 0.20
+    agc_threshold_db_range: Tuple[float, float] = (-24.0, -9.0)
+    agc_ratio_range: Tuple[float, float] = (2.0, 4.0)
+    agc_attack_ms: float = 5.0
+    agc_release_ms: float = 50.0
+
+    # Occasional shouting into the mic / preamp saturation.
+    saturation_prob: float = 0.05
+    drive_range: Tuple[float, float] = (1.0, 2.0)
+    nonlin_family: str = "random"  # "tanh" | "arctan" | "softsign" | "random"
+
+    def is_active(self) -> bool:
+        return any(p > 0 for p in (self.agc_prob, self.saturation_prob))
+
+
+@dataclass
+class MicAugConfig:
+    """Realism augmentations on the mic-capture path.
+
+    Applied post-mix (near-end + echo + noise) to model the ADC / mic
+    response chain. Every stage is independently prob-gated.
+    """
+    # Capture EQ (HPF bass-cut + LPF bandwidth-limit, optional presence bump).
+    mic_eq_prob: float = 0.4
+    mic_hpf_range: Tuple[float, float] = (80.0, 250.0)
+    mic_lpf_range: Tuple[float, float] = (5000.0, 8000.0)
+    mic_eq_q_range: Tuple[float, float] = (0.5, 1.2)
+    mic_eq_bump_prob: float = 0.5
+    mic_eq_bump_freq_range: Tuple[float, float] = (1500.0, 5000.0)
+    mic_eq_bump_gain_db_range: Tuple[float, float] = (-3.0, 5.0)
+
+    # Additive self-noise (mic preamp hiss).
+    mic_hiss_prob: float = 0.15
+    mic_hiss_snr_range: Tuple[float, float] = (35.0, 60.0)
+    mic_hiss_pink_prob: float = 0.5  # otherwise white
+
+    # ADC / envelope clipping.
+    mic_clip_prob: float = 0.03
+    mic_clip_thresh_range: Tuple[float, float] = (0.85, 0.97)
+
+    def is_active(self) -> bool:
+        return any(p > 0 for p in (
+            self.mic_eq_prob, self.mic_hiss_prob, self.mic_clip_prob,
+        ))
+
+
+@dataclass
 class DataConfig:
     clean_dir: str = ""
     noise_dir: str = ""
@@ -73,9 +210,21 @@ class DataConfig:
     ser_range: Tuple[float, float] = (-10, 10)
     delay_range: Tuple[float, float] = (0, 320)
     max_delay_frames: int = 32
+    # Far-end single-talk (ref active, mic silent).
     single_talk_prob: float = 0.2
+    # Near-end single-talk (mic active, ref is near-silence / zeros).
+    single_talk_nearend_prob: float = 0.12
+    # Ref has content but no echo in mix (headphones / muted speaker / far-field).
+    ref_active_no_echo_prob: float = 0.10
+    # In no-echo scenarios, zero near-end with this probability.
+    silent_nearend_prob: float = 0.15
+    # Draw ref from noise pool instead of farend pool (music / game audio).
+    nonspeech_ref_prob: float = 0.20
     max_rir_length_ms: float = 500.0
     drr_range: Tuple[float, float] = (0, 20)  # DRR dB, uniform
+    # Skip both near-end and far-end RIR for a clip — forces the model to
+    # align + cancel from ref directly, not from an RIR fingerprint.
+    rir_skip_prob: float = 0.05
     dnsmos_ovrl_min: float = 0.0  # DNSMOS quality filter (0 = disabled)
     num_train: int = 10000  # only used for DummyAECDataset
     num_val: int = 1000
@@ -84,6 +233,9 @@ class DataConfig:
     overfit_snr_db: float = 20.0
     overfit_ser_db: float = 0.0
     overfit_repeat: int = 1
+    farend_aug: FarEndAugConfig = field(default_factory=FarEndAugConfig)
+    nearend_aug: NearEndAugConfig = field(default_factory=NearEndAugConfig)
+    mic_aug: MicAugConfig = field(default_factory=MicAugConfig)
 
 
 @dataclass
