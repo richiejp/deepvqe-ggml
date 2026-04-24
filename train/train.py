@@ -162,7 +162,10 @@ def log_audio_and_spectrograms(writer, model, val_batches, epoch, cfg, device,
     diag_delay_dist = None
     diag_mic_stft = None
 
-    with torch.no_grad():
+    use_amp = cfg.training.amp and device.type == "cuda"
+    autocast_ctx = torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp)
+
+    with torch.no_grad(), autocast_ctx:
         # Log multiple audio samples for review
         for i, (batch, sample_idx) in enumerate(val_batches):
             mic_stft = batch["mic_stft"][sample_idx:sample_idx+1].to(device)
@@ -247,6 +250,8 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
     print(f"Parameters: {n_params:,}")
     act_capture = ActivationCapture(model)
     if device.type == "cuda":
+        # Allow enough recompiles for BFloat16/Float32 dtype variants + hook states
+        torch._dynamo.config.recompile_limit = 256
         model = torch.compile(model)
         print("Model compiled with torch.compile")
 
@@ -434,10 +439,9 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
 
             if (batch_idx + 1) % accum_steps == 0:
                 raw_gn = nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
-                gn = raw_gn.item()
 
-                # Bail on NaN gradients before corrupting optimizer state
-                if not torch.isfinite(raw_gn):
+                # Bail on NaN gradients (check every 10 steps to avoid sync overhead)
+                if global_step % 10 == 0 and not torch.isfinite(raw_gn):
                     print(f"\n  FATAL: NaN/Inf gradient norm at step {global_step}, "
                           f"epoch {epoch+1}. Stopping.")
                     optimizer.zero_grad()
@@ -450,46 +454,57 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
                 optimizer.zero_grad()
                 global_step += 1
 
-                # Log per-step
-                cur_lr = optimizer.param_groups[0]["lr"]
-                add_scalar_with_help(writer, "train/loss", components["total"].item(), global_step)
-                add_scalar_with_help(writer, "train/plcmse", components["plcmse"].item(), global_step)
-                # Always log delay_acc as a diagnostic even without delay supervision
-                add_scalar_with_help(writer, "train/delay_acc", delay_acc.item(), global_step)
-                add_scalar_with_help(writer, "train/lr", cur_lr, global_step)
-                add_scalar_with_help(writer, "train/grad_norm", gn, global_step)
-                log_per_layer_grad_norms(writer, _unwrap(model), global_step)
-                # Log active auxiliary components
-                loss_weights = {"plcmse": cfg.loss.plcmse_weight}
-                for key, w in [("mag_l1", cfg.loss.mag_l1_weight),
-                               ("time_l1", cfg.loss.time_l1_weight),
-                               ("sisdr", cfg.loss.sisdr_weight),
-                               ("smooth_l1", cfg.loss.smooth_l1_weight),
-                               ("energy_pres", cfg.loss.energy_preservation_weight),
-                               ("delay", cfg.loss.delay_weight),
-                               ("entropy", cfg.loss.entropy_weight),
-                               ("mask_reg", cfg.loss.mask_reg_weight)]:
-                    if w > 0 and key in components:
-                        add_scalar_with_help(writer, f"train/{key}", components[key].item(), global_step)
-                        loss_weights[key] = w
-                log_loss_ratios(writer, components, global_step, weights=loss_weights)
+                # Log to TensorBoard every 10 optimizer steps (reduces GPU sync overhead)
+                log_this_step = (global_step % 10 == 0)
+                if log_this_step:
+                    cur_lr = optimizer.param_groups[0]["lr"]
+                    add_scalar_with_help(writer, "train/loss", components["total"].item(), global_step)
+                    add_scalar_with_help(writer, "train/plcmse", components["plcmse"].item(), global_step)
+                    add_scalar_with_help(writer, "train/delay_acc", delay_acc.item(), global_step)
+                    add_scalar_with_help(writer, "train/lr", cur_lr, global_step)
+                    add_scalar_with_help(writer, "train/grad_norm", raw_gn.item(), global_step)
+                    # Log active auxiliary components
+                    loss_weights = {"plcmse": cfg.loss.plcmse_weight}
+                    for key, w in [("mag_l1", cfg.loss.mag_l1_weight),
+                                   ("time_l1", cfg.loss.time_l1_weight),
+                                   ("sisdr", cfg.loss.sisdr_weight),
+                                   ("smooth_l1", cfg.loss.smooth_l1_weight),
+                                   ("energy_pres", cfg.loss.energy_preservation_weight),
+                                   ("delay", cfg.loss.delay_weight),
+                                   ("entropy", cfg.loss.entropy_weight),
+                                   ("mask_reg", cfg.loss.mask_reg_weight)]:
+                        if w > 0 and key in components:
+                            add_scalar_with_help(writer, f"train/{key}", components[key].item(), global_step)
+                            loss_weights[key] = w
+                    log_loss_ratios(writer, components, global_step, weights=loss_weights)
 
+                # Per-layer grad norms — expensive, log every 100 steps
+                if global_step % 100 == 0:
+                    log_per_layer_grad_norms(writer, _unwrap(model), global_step)
+
+                # Update progress bar at logging steps only (reuse synced values)
+                if log_this_step:
+                    pbar.set_postfix(
+                        loss=f"{components['total'].item():.4f}",
+                        dacc=f"{delay_acc.item():.0%}",
+                        lr=f"{optimizer.param_groups[0]['lr']:.2e}",
+                    )
+
+            # Accumulate epoch stats on GPU (no sync until epoch end)
             for k in epoch_losses:
-                epoch_losses[k] += components[k].item()
-            epoch_delay_acc += delay_acc.item()
+                epoch_losses[k] = epoch_losses[k] + components[k].detach()
+            epoch_delay_acc = epoch_delay_acc + delay_acc.detach()
             n_batches += 1
 
-            pbar.set_postfix(
-                loss=f"{components['total'].item():.4f}",
-                dacc=f"{delay_acc.item():.0%}",
-                lr=f"{optimizer.param_groups[0]['lr']:.2e}",
-            )
-
-        # Epoch averages
+        # Epoch averages (single GPU sync point for all accumulated tensors)
         for k in epoch_losses:
-            epoch_losses[k] /= max(n_batches, 1)
+            avg = epoch_losses[k] / max(n_batches, 1)
+            epoch_losses[k] = avg.item() if torch.is_tensor(avg) else avg
             add_scalar_with_help(writer, f"train_epoch/{k}", epoch_losses[k], epoch)
-        epoch_delay_acc /= max(n_batches, 1)
+        if torch.is_tensor(epoch_delay_acc):
+            epoch_delay_acc = (epoch_delay_acc / max(n_batches, 1)).item()
+        else:
+            epoch_delay_acc /= max(n_batches, 1)
         add_scalar_with_help(writer, "train_epoch/delay_acc", epoch_delay_acc, epoch)
 
         # Weight histograms every 5 epochs
@@ -576,8 +591,10 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
                     # Per-sample ERLE
                     echo_i = mic_wav[i] - clean_wav[i]
                     res_i = enh_wav[i] - clean_wav[i]
+                    # eps on numerator too — NE-ST / raneo scenarios synthesise
+                    # echo ≈ 0 by design, so without it log10(0) → -inf poisons mean
                     erle_i = 10 * torch.log10(
-                        (echo_i ** 2).sum() / ((res_i ** 2).sum() + 1e-10)
+                        ((echo_i ** 2).sum() + 1e-10) / ((res_i ** 2).sum() + 1e-10)
                     ).item()
                     scenario_erle[sc].append(erle_i)
 
@@ -619,8 +636,8 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
                         aecmos_count += 1
 
                 for k in val_losses:
-                    val_losses[k] += components[k].item()
-                val_delay_acc += delay_acc.item()
+                    val_losses[k] = val_losses[k] + components[k].detach()
+                val_delay_acc = val_delay_acc + delay_acc.detach()
                 n_val += 1
 
                 if batch_idx in tb_batch_indices:
@@ -630,17 +647,26 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
                     val_sample_batches.append((batch, sample_idx))
 
         for k in val_losses:
-            val_losses[k] /= max(n_val, 1)
+            avg = val_losses[k] / max(n_val, 1)
+            val_losses[k] = avg.item() if torch.is_tensor(avg) else avg
             add_scalar_with_help(writer, f"val/{k}", val_losses[k], epoch)
-        val_delay_acc /= max(n_val, 1)
+        if torch.is_tensor(val_delay_acc):
+            val_delay_acc = (val_delay_acc / max(n_val, 1)).item()
+        else:
+            val_delay_acc /= max(n_val, 1)
         add_scalar_with_help(writer, "val/delay_acc", val_delay_acc, epoch)
 
-        # Per-scenario ERLE
+        # Per-scenario ERLE (skip non-finite from eps-padded log10)
         for sc, values in scenario_erle.items():
-            add_scalar_with_help(writer, f"val/erle_{sc}", np.mean(values), epoch)
-        # Overall ERLE (aggregate across all scenarios)
-        all_erle = [v for vals in scenario_erle.values() for v in vals]
-        val_erle = np.mean(all_erle) if all_erle else 0.0
+            finite = [v for v in values if np.isfinite(v)]
+            mean_val = float(np.mean(finite)) if finite else 0.0
+            add_scalar_with_help(writer, f"val/erle_{sc}", mean_val, epoch)
+        # Overall ERLE: only aggregate scenarios with real echo; NE-ST and
+        # raneo have echo=0 by construction so their ERLE is ill-defined.
+        echo_scenarios = ("single_talk_farend", "double_talk")
+        echo_erle = [v for sc in echo_scenarios for v in scenario_erle.get(sc, [])
+                     if np.isfinite(v)]
+        val_erle = float(np.mean(echo_erle)) if echo_erle else 0.0
         add_scalar_with_help(writer, "val/erle_db", val_erle, epoch)
         # PESQ/STOI for double-talk
         for sc, values in scenario_pesq.items():

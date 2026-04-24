@@ -15,7 +15,7 @@ audio:
   n_freqs: 257  # n_fft // 2 + 1
 
 training:
-  batch_size: 32
+  batch_size: 64
   grad_accum_steps: 2
   num_workers: 12
   optimizer: soap            # "schedulefree" or "soap"
