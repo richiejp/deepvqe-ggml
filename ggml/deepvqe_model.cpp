@@ -187,7 +187,7 @@ static Buf align_block(const Buf& x_mic, const Buf& x_ref, const deepvqe_model& 
     auto& hp = m.hparams;
     int C = x_mic.C, T = x_mic.T, F = x_mic.F;
     int H = hp.align_hidden, dmax = hp.dmax;
-    float temperature = 1.0f;
+    float temperature = hp.align_temperature;
 
     auto& pmw = W(m, "align.pconv_mic.weight");
     auto& pmb = W(m, "align.pconv_mic.bias");
@@ -662,6 +662,12 @@ static Buf align_block_frame(const Buf& x_mic, const Buf& x_ref,
     Buf Vc = causal_conv_frame(V, st.align_smooth,
                                 sw.data.data(), sb.data.data(), 1, 1);
 
+    // Apply softmax temperature (matches batch path; default 1.0 = no scaling)
+    float temperature = m.hparams.align_temperature;
+    if (temperature != 1.0f) {
+        for (int d = 0; d < dmax; d++) Vc(0, 0, d) /= temperature;
+    }
+
     // Softmax over delay
     float mx = Vc(0, 0, 0);
     for (int d = 1; d < dmax; d++)
@@ -978,6 +984,8 @@ bool load_model(const char* path, deepvqe_model& model, bool verbose) {
     hp.power_law_c = idx >= 0 ? gguf_get_val_f32(gctx, idx) : 0.3f;
     idx = gguf_find_key(gctx, "deepvqe.bn_folded");
     hp.bn_folded = idx >= 0 ? gguf_get_val_bool(gctx, idx) : true;
+    idx = gguf_find_key(gctx, "deepvqe.align_temperature");
+    hp.align_temperature = idx >= 0 ? gguf_get_val_f32(gctx, idx) : 1.0f;
 
     int mic_n = (int)gguf_u32(gctx, "deepvqe.mic_channels.count");
     hp.mic_channels.resize(mic_n);

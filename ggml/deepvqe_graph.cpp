@@ -569,6 +569,8 @@ bool load_graph_model(const char* path, dvqe_graph_model& model,
     hp.align_hidden = (int)gguf_u32(gctx, "deepvqe.align_hidden");
     int idx = gguf_find_key(gctx, "deepvqe.power_law_c");
     hp.power_law_c = idx >= 0 ? gguf_get_val_f32(gctx, idx) : 0.3f;
+    idx = gguf_find_key(gctx, "deepvqe.align_temperature");
+    hp.align_temperature = idx >= 0 ? gguf_get_val_f32(gctx, idx) : 1.0f;
 
     int mic_n = (int)gguf_u32(gctx, "deepvqe.mic_channels.count");
     hp.mic_channels.resize(mic_n);
@@ -874,7 +876,8 @@ static struct ggml_tensor* build_align_s(
     struct ggml_tensor* pmw, struct ggml_tensor* pmb,   // pconv_mic: (1, 1, C, H)
     struct ggml_tensor* prw, struct ggml_tensor* prb,   // pconv_ref: (1, 1, C, H)
     struct ggml_tensor* sw, struct ggml_tensor* sb,     // smooth conv: (3, 5, H, 1)
-    int dmax
+    int dmax,
+    float temperature
 ) {
     int64_t F = x_mic->ne[0], C = x_mic->ne[2];
     int64_t H = pmw->ne[3];
@@ -945,6 +948,12 @@ static struct ggml_tensor* build_align_s(
     struct ggml_tensor* s_bias = ggml_reshape_4d(ctx, sb, 1,1,1,1);
     Vc = ggml_add(ctx, Vc, s_bias);
     Vc = ggml_reshape_2d(ctx, Vc, dmax, 1);
+
+    // Apply softmax temperature: divide logits by T before softmax
+    // (T < 1 sharpens, T > 1 flattens). Default 1.0 = no scaling.
+    if (temperature != 1.0f) {
+        Vc = ggml_scale(ctx, Vc, 1.0f / temperature);
+    }
 
     // Softmax over delay dim
     struct ggml_tensor* attn = ggml_soft_max(ctx, Vc);  // (dmax, 1)
@@ -1160,7 +1169,7 @@ bool build_stream_graph(dvqe_graph_model& m, dvqe_stream_graph& sg) {
         m.w("align.pconv_mic.weight"), m.w("align.pconv_mic.bias"),
         m.w("align.pconv_ref.weight"), m.w("align.pconv_ref.bias"),
         m.w("align.conv.1.weight"), m.w("align.conv.1.bias"),
-        hp.dmax);
+        hp.dmax, hp.align_temperature);
 
     // 5. Concat + encoder 3-5
     struct ggml_tensor* cat = build_concat_channels(ctx, mic_e2, aligned);

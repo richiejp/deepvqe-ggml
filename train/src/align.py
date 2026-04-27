@@ -15,12 +15,16 @@ class AlignBlock(nn.Module):
       (in_channels) for the weighted sum reshape.
     """
 
-    def __init__(self, in_channels, hidden_channels, dmax=32, temperature=1.0):
+    def __init__(self, in_channels, hidden_channels, dmax=32, temperature=0.1):
         super().__init__()
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
         self.dmax = dmax
-        self.temperature = temperature
+        # Buffer (not a Parameter): travels in state_dict and follows .to(device),
+        # so the annealed value persists across save/load and is available at
+        # inference. Default matches align_temp_end so a fresh-init model used
+        # for inference sees the same softmax sharpness training converged to.
+        self.register_buffer("temperature", torch.tensor(float(temperature)))
 
         # Pointwise projections for Q and K
         self.pconv_mic = nn.Conv2d(in_channels, hidden_channels, 1)

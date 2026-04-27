@@ -195,6 +195,11 @@ def export_gguf(model: DeepVQEAEC, cfg, output_path: str, fold_bn=True,
     writer.add_uint32("deepvqe.align_hidden", cfg.model.align_hidden)
     writer.add_bool("deepvqe.bn_folded", fold_bn)
     writer.add_bool("deepvqe.quantized", quantize)
+    # AlignBlock softmax temperature — read from the live model so the
+    # exported value reflects whatever the buffer holds (annealed end value
+    # after training, or the constructor default for a fresh model).
+    align_t = float(export_model.align.temperature.detach().cpu().item())
+    writer.add_float32("deepvqe.align_temperature", align_t)
 
     # Channel configs as arrays
     for i, ch in enumerate(cfg.model.mic_channels):
@@ -215,6 +220,11 @@ def export_gguf(model: DeepVQEAEC, cfg, output_path: str, fold_bn=True,
         # Skip Identity (folded BN) remnants and non-parameter buffers
         # that are BN running stats
         if "running_mean" in name or "running_var" in name or "num_batches_tracked" in name:
+            n_skipped += 1
+            continue
+        # align.temperature is a 0-d buffer — exported as GGUF metadata above
+        # (deepvqe.align_temperature), not as a tensor.
+        if name == "align.temperature":
             n_skipped += 1
             continue
 

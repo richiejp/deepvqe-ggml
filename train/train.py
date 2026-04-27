@@ -376,7 +376,9 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
         else:
             temperature = t_end
         align = _unwrap(model).align
-        align.temperature = temperature
+        # In-place fill of the registered buffer; mutating .temperature directly
+        # would shadow the buffer with a Python attribute and break state_dict.
+        align.temperature.fill_(temperature)
         add_scalar_with_help(writer, "train/temperature", temperature, epoch)
 
         epoch_losses = {"total": 0, "plcmse": 0}

@@ -18,6 +18,10 @@ struct deepvqe_hparams {
     int sample_rate  = 16000;
     int dmax         = 32;
     int align_hidden = 32;
+    // AlignBlock softmax temperature. Default 1.0 preserves behaviour for
+    // GGUFs exported before the metadata key existed; new exports embed the
+    // trained value (typically the align_temp_end of the curriculum).
+    float align_temperature = 1.0f;
     float power_law_c = 0.3f;
     bool bn_folded   = true;
     std::vector<int> mic_channels;

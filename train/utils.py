@@ -60,7 +60,15 @@ def load_checkpoint(path, model, optimizer=None, scheduler=None):
     state = ckpt["model_state_dict"]
     # Strip _orig_mod. prefix for backward compat with old checkpoints
     state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
-    _unwrap(model).load_state_dict(state)
+    # strict=False so checkpoints from before align.temperature became a
+    # registered buffer still load — the buffer keeps its init default in
+    # that case, which already matches the trained anneal endpoint.
+    result = _unwrap(model).load_state_dict(state, strict=False)
+    if result.unexpected_keys:
+        print(f"  Warning: unexpected keys in checkpoint: {result.unexpected_keys}")
+    legit_missing = [k for k in result.missing_keys if k != "align.temperature"]
+    if legit_missing:
+        print(f"  Warning: missing keys in checkpoint: {legit_missing}")
     if optimizer and "optimizer_state_dict" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     if scheduler and "scheduler_state_dict" in ckpt:
